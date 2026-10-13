@@ -215,6 +215,7 @@ func TestEvaluateRetry(t *testing.T) {
 	}{
 		{"429 with Retry-After 0", nil, []int{429, 200}, map[string]string{"Retry-After": "0"}, 2, 0, []time.Duration{0}},
 		{"5xx backs off 500ms then 1s", nil, []int{503, 503, 200}, nil, 3, 0, []time.Duration{500 * time.Millisecond, time.Second}},
+		{"500 is retried", nil, []int{500, 200}, nil, 2, 0, []time.Duration{500 * time.Millisecond}},
 		{"default 2 retries exhausted", nil, []int{503}, nil, 3, 503, []time.Duration{500 * time.Millisecond, time.Second}},
 		{"retries disabled", []Option{WithMaxRetries(0)}, []int{503}, nil, 1, 503, nil},
 		{"backoff capped at 5s", []Option{WithMaxRetries(5)}, []int{503}, nil, 6, 503, []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second}},
@@ -291,5 +292,23 @@ func TestEvaluateCanceledDuringWait(t *testing.T) {
 	}
 	if _, err := c.Evaluate(ctx, docRequest()); !errors.Is(err, context.Canceled) || hits.Load() != 1 {
 		t.Fatalf("Evaluate() error = %v after %d requests; want context.Canceled after 1", err, hits.Load())
+	}
+}
+
+func TestEvaluateCanceledDuringDefaultSleep(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	// No c.sleep seam: the real timer wait must return once ctx is canceled.
+	_, err := New(WithBaseURL(srv.URL)).Evaluate(ctx, docRequest())
+	if elapsed := time.Since(start); !errors.Is(err, context.Canceled) || hits.Load() != 1 || elapsed >= 2*time.Second {
+		t.Fatalf("Evaluate() error = %v after %d requests in %v; want context.Canceled after 1 within 2s", err, hits.Load(), elapsed)
 	}
 }
